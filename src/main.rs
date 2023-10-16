@@ -1,5 +1,10 @@
+mod audio_device_volume_notification_client;
+
+use audio_device_volume_notification_client::*;
+
 use std::ptr;
 use std::ptr::{null, null_mut};
+use tokio::sync::mpsc::{channel, Receiver, Sender};
 use std::thread::sleep;
 use std::time::Duration;
 use cue_sdk::device::CueDevice;
@@ -10,41 +15,80 @@ use rdev::{Event, EventType, grab, Key};
 
 use windows::Win32::{Media::Audio::*, System::Com::*};
 use windows::Win32::Foundation::{FALSE, HWND, TRUE};
-use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolumeEx;
+use windows::Win32::Media::Audio::Endpoints::{IAudioEndpointVolumeCallback, IAudioEndpointVolumeCallback_Impl, IAudioEndpointVolumeEx};
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::WindowsAndMessaging::{GetMessageA, MSG, WM_INPUT, WM_KEYFIRST};
+use log::{debug, error};
+use tokio::sync::mpsc;
 
-fn main() {
+#[tokio::main]
+async fn main() {
+    set_color(false);
+    // detect_mute();
+    register_control_change_notify().await;
     // register_hotkey(VK_F13);
-    set_color(true);
 
-    loop {};
+    // loop {};
 }
 
 fn set_color(muted: bool) {
+    let mute_key = 84;
     let cue = cue_sdk::initialize().unwrap();
     let mut devices = cue.get_all_devices().unwrap();
 
-    let mut color;
+    let mut color: LedColor;
 
     match muted {
         true => color = LedColor { red: 255, green: 0, blue: 0 },
         false => color = LedColor { red: 0, green: 255, blue: 0 },
     }
 
-    let white = LedColor { red: 255, green: 255, blue: 255 };
-
     devices.iter_mut().for_each(|mut d: &mut CueDevice| {
-        d.leds.get_mut(KeyMute as usize).unwrap().update_color_buffer(color).unwrap();
+        d.leds.get_mut(mute_key).unwrap().update_color_buffer(color).unwrap();
         cue.flush_led_colors_update_buffer_sync().unwrap();
-
-        // d.leds.iter_mut().for_each(|mut l: &mut CueLed| {
-        //     println!("{:?}", l);
-        //     l.update_color_buffer(white).unwrap();
-        //     cue.flush_led_colors_update_buffer_sync().unwrap();
-        //     sleep(Duration::from_millis(100));
-        // });
     });
+}
+
+unsafe fn get_audio_enumerator() -> IMMDeviceEnumerator {
+    CoInitialize(Some(null())).unwrap();
+
+    CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).unwrap()
+}
+
+unsafe fn get_default_input_endpoint(enumerator: &IMMDeviceEnumerator) -> IAudioEndpointVolumeEx {
+    let device = enumerator
+        .GetDefaultAudioEndpoint(eCapture, eMultimedia)
+        .unwrap();
+
+    device.Activate::<IAudioEndpointVolumeEx>(CLSCTX_ALL, Some(ptr::null())).unwrap()
+}
+
+async fn register_control_change_notify() {
+    unsafe {
+        let enumerator = get_audio_enumerator();
+        let endpoint = get_default_input_endpoint(&enumerator);
+
+        let (on_notify_tx, mut on_notify_rx) = channel(10);
+
+        let notification_client = AudioDeviceVolumeNotificationClient::new(on_notify_tx);
+
+        endpoint.RegisterControlChangeNotify(&notification_client).unwrap();
+
+        while let Some(msg) = on_notify_rx.recv().await {
+            println!("received control change notify: {:?}", msg);
+            let muted = endpoint.GetMute().unwrap();
+            match muted {
+                TRUE => set_color(true),
+                FALSE => set_color(false),
+                _ => {}
+            };
+        }
+
+
+        println!("unregistering control change notify");
+
+        endpoint.UnregisterControlChangeNotify(&notification_client).unwrap();
+    }
 }
 
 fn register_hotkey(key: VIRTUAL_KEY) {
@@ -52,10 +96,7 @@ fn register_hotkey(key: VIRTUAL_KEY) {
         let hotkey = windows::Win32::UI::Input::KeyboardAndMouse::RegisterHotKey(HWND(0), 1, MOD_NOREPEAT, key.0.into());
         println!("hotkey registered: {:?}", hotkey);
 
-        CoInitialize(Some(null())).unwrap();
-
-        let enumerator: IMMDeviceEnumerator =
-            CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).unwrap();
+        let enumerator = get_audio_enumerator();
 
         let mut msg = MSG::default();
         while GetMessageA(&mut msg, HWND(-1), 0, 0) != FALSE {
@@ -67,11 +108,8 @@ fn register_hotkey(key: VIRTUAL_KEY) {
 
 fn toggle_mute(enumerator: &IMMDeviceEnumerator) {
     unsafe {
-        let device = enumerator
-            .GetDefaultAudioEndpoint(eCapture, eMultimedia)
-            .unwrap();
+        let endpoint = get_default_input_endpoint(enumerator);
 
-        let endpoint = device.Activate::<IAudioEndpointVolumeEx>(CLSCTX_ALL, Some(ptr::null())).unwrap();
         let muted = endpoint.GetMute().unwrap();
         match muted {
             TRUE => endpoint.SetMute(FALSE, ptr::null()).unwrap(),
@@ -80,7 +118,11 @@ fn toggle_mute(enumerator: &IMMDeviceEnumerator) {
         }
     }
 }
+
 /*
+
+maybe old code idk:
+
     unsafe {
         // CoInitializeEx(Some(ptr::null()), COINIT_MULTITHREADED).unwrap();
 
