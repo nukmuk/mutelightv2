@@ -1,11 +1,13 @@
 mod audio_device_volume_notification_client;
+mod device_changed_notification_client;
 
 use audio_device_volume_notification_client::*;
 
 use std::{ptr, thread};
 use std::ptr::{null, null_mut};
+use std::sync::Arc;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
-use std::thread::sleep;
+use std::thread::{park, sleep};
 use std::time::Duration;
 use cue_sdk::device::CueDevice;
 use cue_sdk::device::DeviceLayout::Keyboard;
@@ -20,18 +22,45 @@ use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::WindowsAndMessaging::{GetMessageA, MSG, WM_INPUT, WM_KEYFIRST};
 use log::{debug, error};
 use tokio::sync::mpsc;
+use crate::device_changed_notification_client::DeviceChangedNotificationClient;
 
 #[tokio::main]
 async fn main() {
-    // detect_mute();
-    // let endpoint = register_control_change_notify();
-    thread::spawn(|| {
-        let endpoint = register_control_change_notify();
-        loop {};
-    });
-    // register_hotkey(VK_F13);
+    unsafe {
+        let device_handle = thread::spawn(|| {
+            let enumerator = get_audio_enumerator();
+            detect_device_changed(enumerator);
+            park();
+        });
 
-    loop {};
+        println!("device changed detected");
+
+        sleep(Duration::from_secs(1));
+
+        println!("sleeped for 1 second");
+
+        // let state_handle = thread::spawn(|| {
+        //     let endpoint = register_devicestate_change_notify();
+        //     park();
+        // });
+
+        let hotkey_handle = thread::spawn(|| {
+            register_hotkey(VK_INSERT);
+        });
+
+        // wait for all threads to finish
+        device_handle.join().unwrap();
+        // state_handle.join().unwrap();
+        hotkey_handle.join().unwrap();
+    }
+}
+
+fn detect_device_changed(enumerator: IMMDeviceEnumerator) {
+    unsafe {
+        let notification_client = DeviceChangedNotificationClient::new();
+
+        enumerator.RegisterEndpointNotificationCallback(&notification_client).unwrap();
+    }
 }
 
 fn set_color(muted: BOOL) {
@@ -45,6 +74,8 @@ fn set_color(muted: BOOL) {
         _ => LedColor { red: 255, green: 255, blue: 0 },
     };
 
+    dbg!("changing color to {}", color);
+
     devices.iter_mut().for_each(|mut d: &mut CueDevice| {
         d.leds.get_mut(mute_key).unwrap().update_color_buffer(color).unwrap();
         cue.flush_led_colors_update_buffer_sync().unwrap();
@@ -52,9 +83,10 @@ fn set_color(muted: BOOL) {
 }
 
 unsafe fn get_audio_enumerator() -> IMMDeviceEnumerator {
-    CoInitialize(Some(null())).unwrap();
-
-    CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).unwrap()
+    // CoInitializeEx(Some(null_mut()), COINIT_MULTITHREADED).unwrap();
+    RoInitialize();
+    let enumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).unwrap();
+    enumerator
 }
 
 unsafe fn get_default_input_endpoint(enumerator: &IMMDeviceEnumerator) -> IAudioEndpointVolumeEx {
@@ -65,7 +97,7 @@ unsafe fn get_default_input_endpoint(enumerator: &IMMDeviceEnumerator) -> IAudio
     device.Activate::<IAudioEndpointVolumeEx>(CLSCTX_ALL, Some(ptr::null())).unwrap()
 }
 
-fn register_control_change_notify() -> IAudioEndpointVolumeEx {
+fn register_devicestate_change_notify() -> IAudioEndpointVolumeEx {
     unsafe {
         let enumerator = get_audio_enumerator();
         let endpoint = get_default_input_endpoint(&enumerator);
@@ -98,12 +130,12 @@ fn register_hotkey(key: VIRTUAL_KEY) {
         let hotkey = windows::Win32::UI::Input::KeyboardAndMouse::RegisterHotKey(HWND(0), 1, MOD_NOREPEAT, key.0.into());
         println!("hotkey registered: {:?}", hotkey);
 
-        let enumerator = get_audio_enumerator();
+        // let enumerator = get_audio_enumerator();
 
         let mut msg = MSG::default();
         while GetMessageA(&mut msg, HWND(-1), 0, 0) != FALSE {
             println!("{:?}", msg);
-            toggle_mute(&enumerator);
+            //     toggle_mute(&enumerator);
         };
     };
 }

@@ -23,15 +23,6 @@ impl IAudioEndpointVolumeCallback_Impl for AudioDeviceVolumeNotificationClient {
             println!("{:?}", notify);
             set_color(notify.bMuted);
         }
-        // let tx = self.channel.clone();
-        // self.handle.spawn(async move {
-        //     if let Err(e) = tx.send(()).await {
-        //         error!(
-        //             "[Core] onNotify could not send channel notification: {:?}",
-        //             e
-        //         );
-        //     }
-        // });
         Ok(())
     }
 }
