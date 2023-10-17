@@ -2,7 +2,7 @@ mod audio_device_volume_notification_client;
 
 use audio_device_volume_notification_client::*;
 
-use std::ptr;
+use std::{ptr, thread};
 use std::ptr::{null, null_mut};
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 use std::thread::sleep;
@@ -14,7 +14,7 @@ use cue_sdk::led::KeyboardLedId::{KeyMute, KeyScanNextTrack, KeyWinLock};
 use rdev::{Event, EventType, grab, Key};
 
 use windows::Win32::{Media::Audio::*, System::Com::*};
-use windows::Win32::Foundation::{FALSE, HWND, TRUE};
+use windows::Win32::Foundation::{BOOL, FALSE, HWND, TRUE};
 use windows::Win32::Media::Audio::Endpoints::{IAudioEndpointVolumeCallback, IAudioEndpointVolumeCallback_Impl, IAudioEndpointVolumeEx};
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::WindowsAndMessaging::{GetMessageA, MSG, WM_INPUT, WM_KEYFIRST};
@@ -23,25 +23,27 @@ use tokio::sync::mpsc;
 
 #[tokio::main]
 async fn main() {
-    set_color(false);
     // detect_mute();
-    register_control_change_notify().await;
+    // let endpoint = register_control_change_notify();
+    thread::spawn(|| {
+        let endpoint = register_control_change_notify();
+        loop {};
+    });
     // register_hotkey(VK_F13);
 
-    // loop {};
+    loop {};
 }
 
-fn set_color(muted: bool) {
+fn set_color(muted: BOOL) {
     let mute_key = 84;
     let cue = cue_sdk::initialize().unwrap();
     let mut devices = cue.get_all_devices().unwrap();
 
-    let mut color: LedColor;
-
-    match muted {
-        true => color = LedColor { red: 255, green: 0, blue: 0 },
-        false => color = LedColor { red: 0, green: 255, blue: 0 },
-    }
+    let color = match muted {
+        TRUE => LedColor { red: 255, green: 0, blue: 0 },
+        FALSE => LedColor { red: 0, green: 255, blue: 0 },
+        _ => LedColor { red: 255, green: 255, blue: 0 },
+    };
 
     devices.iter_mut().for_each(|mut d: &mut CueDevice| {
         d.leds.get_mut(mute_key).unwrap().update_color_buffer(color).unwrap();
@@ -63,31 +65,31 @@ unsafe fn get_default_input_endpoint(enumerator: &IMMDeviceEnumerator) -> IAudio
     device.Activate::<IAudioEndpointVolumeEx>(CLSCTX_ALL, Some(ptr::null())).unwrap()
 }
 
-async fn register_control_change_notify() {
+fn register_control_change_notify() -> IAudioEndpointVolumeEx {
     unsafe {
         let enumerator = get_audio_enumerator();
         let endpoint = get_default_input_endpoint(&enumerator);
 
-        let (on_notify_tx, mut on_notify_rx) = channel(10);
+        // let (on_notify_tx, mut on_notify_rx) = ch/annel(10);
 
-        let notification_client = AudioDeviceVolumeNotificationClient::new(on_notify_tx);
+        let notification_client = AudioDeviceVolumeNotificationClient::new();
 
         endpoint.RegisterControlChangeNotify(&notification_client).unwrap();
 
-        while let Some(msg) = on_notify_rx.recv().await {
-            println!("received control change notify: {:?}", msg);
-            let muted = endpoint.GetMute().unwrap();
-            match muted {
-                TRUE => set_color(true),
-                FALSE => set_color(false),
-                _ => {}
-            };
-        }
+        // while let Some(msg) = on_notify_rx.recv().await {
+        //     println!("received control change notify: {:?}", msg);
+        //     let muted = endpoint.GetMute().unwrap();
+        //     match muted {
+        //         TRUE => set_color(true),
+        //         FALSE => set_color(false),
+        //         _ => {}
+        //     };
+        // }
 
+        endpoint
 
-        println!("unregistering control change notify");
-
-        endpoint.UnregisterControlChangeNotify(&notification_client).unwrap();
+        // println!("unregistering control change notify");
+        // endpoint.UnregisterControlChangeNotify(&notification_client).unwrap();
     }
 }
 
