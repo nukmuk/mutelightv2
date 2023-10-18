@@ -4,8 +4,9 @@ mod device_changed_notification_client;
 use audio_device_volume_notification_client::*;
 
 use std::{ptr, thread};
-use std::ptr::{null, null_mut};
-use std::sync::Arc;
+use std::ops::Deref;
+use std::ptr::{NonNull, null, null_mut};
+use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 use std::thread::{park, sleep};
 use std::time::Duration;
@@ -22,42 +23,68 @@ use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::WindowsAndMessaging::{GetMessageA, MSG, WM_INPUT, WM_KEYFIRST};
 use log::{debug, error};
 use tokio::sync::mpsc;
+use windows::core::{ComInterface, Interface};
 use crate::device_changed_notification_client::DeviceChangedNotificationClient;
+
+use windows::Win32::System::WinRT::{RO_INIT_TYPE, RoInitialize};
+
+#[derive(Debug)]
+struct DeviceEnumerator(IMMDeviceEnumerator);
+
+impl DeviceEnumerator {
+    // fn new(enumerator: IMMDeviceEnumerator) -> Self {
+    //     Self(NonNull::new(enumerator).unwrap())
+    // }
+}
+
+impl From<IMMDeviceEnumerator> for DeviceEnumerator {
+    fn from(enumerator: IMMDeviceEnumerator) -> Self {
+        DeviceEnumerator(enumerator)
+    }
+}
+
+unsafe impl Send for DeviceEnumerator {}
 
 #[tokio::main]
 async fn main() {
     unsafe {
-        let device_handle = thread::spawn(|| {
-            let enumerator = get_audio_enumerator();
+        // getting multiple enumerators always results in same pointer
+
+        let original_enumerator = Arc::new(Mutex::new(get_audio_enumerator().into())).clone();
+        let enumerator = original_enumerator.clone();
+
+
+        let devicechanged_handle = thread::spawn(move || {
             detect_device_changed(enumerator);
+            println!("device_handle finished");
+        });
+
+        let enumerator = original_enumerator.clone();
+        let ismuted_handle = thread::spawn(move || {
+            let endpoint = register_devicestate_change_notify(enumerator);
+            println!("state_handle finished");
             park();
         });
 
-        println!("device changed detected");
-
-        sleep(Duration::from_secs(1));
-
-        println!("sleeped for 1 second");
-
-        // let state_handle = thread::spawn(|| {
-        //     let endpoint = register_devicestate_change_notify();
-        //     park();
-        // });
-
-        let hotkey_handle = thread::spawn(|| {
-            register_hotkey(VK_INSERT);
+        let enumerator = original_enumerator.clone();
+        let hotkey_handle = thread::spawn(move || {
+            register_hotkey(VK_INSERT, enumerator);
+            println!("hotkey_handle finished");
         });
 
         // wait for all threads to finish
-        device_handle.join().unwrap();
-        // state_handle.join().unwrap();
+        devicechanged_handle.join().unwrap();
+        ismuted_handle.join().unwrap();
         hotkey_handle.join().unwrap();
+
+        park();
     }
 }
 
-fn detect_device_changed(enumerator: IMMDeviceEnumerator) {
+fn detect_device_changed(enumerator: Arc<Mutex<DeviceEnumerator>>) {
     unsafe {
         let notification_client = DeviceChangedNotificationClient::new();
+        let enumerator: &IMMDeviceEnumerator = &enumerator.lock().unwrap().0;
 
         enumerator.RegisterEndpointNotificationCallback(&notification_client).unwrap();
     }
@@ -83,9 +110,10 @@ fn set_color(muted: BOOL) {
 }
 
 unsafe fn get_audio_enumerator() -> IMMDeviceEnumerator {
-    // CoInitializeEx(Some(null_mut()), COINIT_MULTITHREADED).unwrap();
-    RoInitialize();
-    let enumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).unwrap();
+    CoInitializeEx(Some(null_mut()), COINIT_MULTITHREADED).unwrap();
+    // RoInitialize(RO_INIT_TYPE(0)).unwrap();
+    let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).unwrap();
+    dbg!(&enumerator);
     enumerator
 }
 
@@ -97,52 +125,40 @@ unsafe fn get_default_input_endpoint(enumerator: &IMMDeviceEnumerator) -> IAudio
     device.Activate::<IAudioEndpointVolumeEx>(CLSCTX_ALL, Some(ptr::null())).unwrap()
 }
 
-fn register_devicestate_change_notify() -> IAudioEndpointVolumeEx {
+fn register_devicestate_change_notify(enumerator: Arc<Mutex<DeviceEnumerator>>) -> IAudioEndpointVolumeEx {
     unsafe {
-        let enumerator = get_audio_enumerator();
-        let endpoint = get_default_input_endpoint(&enumerator);
+        let deviceenumerator = &enumerator.lock().unwrap().0;
+        let endpoint = get_default_input_endpoint(&deviceenumerator);
 
         // let (on_notify_tx, mut on_notify_rx) = ch/annel(10);
 
         let notification_client = AudioDeviceVolumeNotificationClient::new();
 
+        // if endpoint gets dropped it will unregister the notification client
         endpoint.RegisterControlChangeNotify(&notification_client).unwrap();
 
-        // while let Some(msg) = on_notify_rx.recv().await {
-        //     println!("received control change notify: {:?}", msg);
-        //     let muted = endpoint.GetMute().unwrap();
-        //     match muted {
-        //         TRUE => set_color(true),
-        //         FALSE => set_color(false),
-        //         _ => {}
-        //     };
-        // }
-
         endpoint
-
-        // println!("unregistering control change notify");
-        // endpoint.UnregisterControlChangeNotify(&notification_client).unwrap();
     }
 }
 
-fn register_hotkey(key: VIRTUAL_KEY) {
+fn register_hotkey(key: VIRTUAL_KEY, enumerator: Arc<Mutex<DeviceEnumerator>>) {
     unsafe {
         let hotkey = windows::Win32::UI::Input::KeyboardAndMouse::RegisterHotKey(HWND(0), 1, MOD_NOREPEAT, key.0.into());
         println!("hotkey registered: {:?}", hotkey);
 
-        // let enumerator = get_audio_enumerator();
+        let mute_enumerator = enumerator.clone();
 
         let mut msg = MSG::default();
         while GetMessageA(&mut msg, HWND(-1), 0, 0) != FALSE {
             println!("{:?}", msg);
-            //     toggle_mute(&enumerator);
+            toggle_mute(mute_enumerator.clone());
         };
     };
 }
 
-fn toggle_mute(enumerator: &IMMDeviceEnumerator) {
+fn toggle_mute(enumerator: Arc<Mutex<DeviceEnumerator>>) {
     unsafe {
-        let endpoint = get_default_input_endpoint(enumerator);
+        let endpoint = get_default_input_endpoint(&enumerator.lock().unwrap().0);
 
         let muted = endpoint.GetMute().unwrap();
         match muted {
