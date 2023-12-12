@@ -17,12 +17,7 @@ impl DeviceChangedNotificationClient {
 
 impl IMMNotificationClient_Impl for DeviceChangedNotificationClient {
     #[allow(non_snake_case)]
-    fn OnDefaultDeviceChanged(&self, flow: EDataFlow, role: ERole, pwstrdefaultdeviceid: &PCWSTR) -> windows::core::Result<()> {
-        if flow != eCapture || role == eCommunications {
-            return Ok(());
-        }
-
-        println!("OnDefaultDeviceChanged");
+    fn OnDeviceStateChanged(&self, pwstrdeviceid: &PCWSTR, dwnewstate: u32) -> windows::core::Result<()> {
         Ok(())
     }
     #[allow(non_snake_case)]
@@ -34,7 +29,12 @@ impl IMMNotificationClient_Impl for DeviceChangedNotificationClient {
         Ok(())
     }
     #[allow(non_snake_case)]
-    fn OnDeviceStateChanged(&self, pwstrdeviceid: &PCWSTR, dwnewstate: u32) -> windows::core::Result<()> {
+    fn OnDefaultDeviceChanged(&self, flow: EDataFlow, role: ERole, pwstrdefaultdeviceid: &PCWSTR) -> windows::core::Result<()> {
+        if flow != eCapture || role == eCommunications {
+            return Ok(());
+        }
+
+        println!("OnDefaultDeviceChanged");
         Ok(())
     }
     #[allow(non_snake_case)]

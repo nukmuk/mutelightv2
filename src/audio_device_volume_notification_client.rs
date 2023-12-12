@@ -19,9 +19,8 @@ impl IAudioEndpointVolumeCallback_Impl for AudioDeviceVolumeNotificationClient {
     #[allow(non_snake_case)]
     fn OnNotify(&self, _notify: *mut AUDIO_VOLUME_NOTIFICATION_DATA) -> windows::core::Result<()> {
         unsafe {
-            let notify = *_notify;
-            println!("{:?}", notify);
-            set_color(notify.bMuted);
+            // println!("{:?}", *_notify);
+            set_color((*_notify).bMuted);
         }
         Ok(())
     }
