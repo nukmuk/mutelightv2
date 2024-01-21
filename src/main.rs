@@ -1,89 +1,42 @@
-mod audio_device_volume_notification_client;
-mod device_changed_notification_client;
+use std::ptr::null;
+use std::thread::park;
+
+use cue_sdk::led::{KeyboardLedId, LedColor, LedId};
+use cue_sdk::led::CueLed;
+use windows::Win32::{Media::Audio::*, System::Com::*};
+use windows::Win32::Foundation::{BOOL, FALSE, HWND, TRUE};
+use windows::Win32::Media::Audio::Endpoints::{IAudioEndpointVolumeCallback, IAudioEndpointVolumeEx};
+use windows::Win32::UI::Input::KeyboardAndMouse::*;
+use windows::Win32::UI::WindowsAndMessaging::{GetMessageW, MSG, WM_HOTKEY};
 
 use audio_device_volume_notification_client::*;
 
-use std::{ptr, thread};
-use std::cell::RefCell;
-use std::ops::Deref;
-use std::ptr::{NonNull, null, null_mut};
-use std::sync::{Arc, Mutex};
-use tokio::sync::mpsc::{channel, Receiver, Sender};
-use std::thread::{park, sleep};
-use std::time::Duration;
-use cue_sdk::device::CueDevice;
-use cue_sdk::device::DeviceLayout::Keyboard;
-use cue_sdk::led::{CueLed, LedColor};
-use cue_sdk::led::KeyboardLedId::{KeyMute, KeyScanNextTrack, KeyWinLock};
-use rdev::{Event, EventType, grab, Key};
-
-use windows::Win32::{Media::Audio::*, System::Com::*};
-use windows::Win32::Foundation::{BOOL, FALSE, HWND, TRUE};
-use windows::Win32::Media::Audio::Endpoints::{IAudioEndpointVolumeCallback, IAudioEndpointVolumeCallback_Impl, IAudioEndpointVolumeEx};
-use windows::Win32::UI::Input::KeyboardAndMouse::*;
-use windows::Win32::UI::WindowsAndMessaging::{GetMessageA, GetMessageW, HWND_NOTOPMOST, HWND_TOP, MSG, WM_APP, WM_HOTKEY, WM_INPUT, WM_KEYFIRST};
-use log::{debug, error};
-use tokio::sync::mpsc;
-use windows::core::{ComInterface, Interface};
-use crate::device_changed_notification_client::DeviceChangedNotificationClient;
-
-use windows::Win32::System::WinRT::{RO_INIT_TYPE, RoInitialize};
+mod audio_device_volume_notification_client;
 
 #[derive(Debug)]
 struct DeviceEnumerator(IMMDeviceEnumerator);
 
-impl DeviceEnumerator {
-    // fn new(enumerator: IMMDeviceEnumerator) -> Self {
-    //     Self(NonNull::new(enumerator).unwrap())
-    // }
+fn main() {
+    let enumerator: IMMDeviceEnumerator = get_audio_enumerator();
+    // getting multiple enumerators always results in same pointer
+    let endpoint = get_default_input_endpoint(&enumerator);
+
+    unsafe { set_led_color(endpoint.GetMute().unwrap()); }
+
+    println!("registering to {:?}", endpoint);
+
+    register_hotkey(VK_F13, &enumerator);
+    println!("hotkey_handle finished");
+
+    park();
 }
 
-// impl From<IMMDeviceEnumerator> for DeviceEnumerator {
-//     fn from(enumerator: IMMDeviceEnumerator) -> Self {
-//         DeviceEnumerator(enumerator)
-//     }
-// }
-//
-// unsafe impl Send for DeviceEnumerator {}
-
-
-#[tokio::main]
-async fn main() {
-    unsafe {
-        let enumerator = get_audio_enumerator();
-        let endpoint = get_default_input_endpoint(&enumerator);
-        // getting multiple enumerators always results in same pointer
-
-        println!("device_handle started");
-        let _device_client = detect_device_changed(&enumerator);
-        println!("device_handle finished");
-
-        println!("state_handle started");
-        let _volume_callback = register_devicestate_change_notify(&endpoint);
-        println!("state_handle finished");
-
-        register_hotkey(VK_INSERT, &endpoint);
-        println!("hotkey_handle finished");
-
-
-        park();
-    }
-}
-
-fn detect_device_changed(enumerator: &IMMDeviceEnumerator) -> IMMNotificationClient {
-    unsafe {
-        let notification_client = DeviceChangedNotificationClient::new();
-        // let enumerator: &IMMDeviceEnumerator = &enumerator.lock().unwrap().0;
-
-        enumerator.RegisterEndpointNotificationCallback(&notification_client).unwrap();
-        notification_client
-    }
-}
-
-fn set_color(muted: BOOL) {
-    let mute_key = 84;
-    let cue = cue_sdk::initialize().unwrap();
-    let mut devices = cue.get_all_devices().unwrap();
+fn set_led_color(muted: BOOL) {
+    let cue = cue_sdk::initialize().expect("cue sdk should be running");
+    let mut devices = cue.get_all_devices().expect("device should be connected");
+    let mute_led: Option<&mut CueLed> = devices.first_mut().and_then(|device| {
+        device.leds.iter_mut().find(|key| key.id == LedId::Keyboard(KeyboardLedId::KeyMute))
+    });
 
     let color = match muted {
         TRUE => LedColor { red: 255, green: 0, blue: 0 },
@@ -93,34 +46,34 @@ fn set_color(muted: BOOL) {
 
     dbg!("changing color to {}", color);
 
-    devices.iter_mut().for_each(|d: &mut CueDevice| {
-        d.leds.get_mut(mute_key).unwrap().update_color_buffer(color).unwrap();
-        cue.flush_led_colors_update_buffer_sync().unwrap();
-    });
+    mute_led.expect("keyboard should contain mute led").update_color_buffer(color).unwrap();
+    cue.flush_led_colors_update_buffer_sync().unwrap();
 }
 
-unsafe fn get_audio_enumerator() -> IMMDeviceEnumerator {
-    println!("CoInitialize");
-    // CoInitializeEx(Some(null_mut()), COINIT_MULTITHREADED).unwrap();
-    CoInitialize(Some(null())).unwrap();
-    // RoInitialize(RO_INIT_TYPE(1)).unwrap();
-    let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).unwrap();
-    dbg!(&enumerator);
-    enumerator
+fn get_audio_enumerator() -> IMMDeviceEnumerator {
+    unsafe {
+        println!("CoInitialize");
+        // CoInitializeEx(Some(null_mut()), COINIT_MULTITHREADED).unwrap();
+        CoInitialize(Some(null())).unwrap();
+        // RoInitialize(RO_INIT_TYPE(1)).unwrap();
+        let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).unwrap();
+        // dbg!(&enumerator);
+        enumerator
+    }
 }
 
-unsafe fn get_default_input_endpoint(enumerator: &IMMDeviceEnumerator) -> IAudioEndpointVolumeEx {
-    let device = enumerator
-        .GetDefaultAudioEndpoint(eCapture, eMultimedia)
-        .unwrap();
+fn get_default_input_endpoint(enumerator: &IMMDeviceEnumerator) -> IAudioEndpointVolumeEx {
+    unsafe {
+        let device = enumerator
+            .GetDefaultAudioEndpoint(eCapture, eMultimedia)
+            .unwrap();
 
-    device.Activate::<IAudioEndpointVolumeEx>(CLSCTX_ALL, Some(ptr::null())).unwrap()
+        device.Activate::<IAudioEndpointVolumeEx>(CLSCTX_ALL, Some(null())).unwrap()
+    }
 }
 
 fn register_devicestate_change_notify(endpoint: &IAudioEndpointVolumeEx) -> IAudioEndpointVolumeCallback {
     unsafe {
-        // let (on_notify_tx, mut on_notify_rx) = ch/annel(10);
-
         let notification_client = AudioDeviceVolumeNotificationClient::new();
 
         // if endpoint gets dropped it will unregister the notification client
@@ -129,63 +82,31 @@ fn register_devicestate_change_notify(endpoint: &IAudioEndpointVolumeEx) -> IAud
     }
 }
 
-fn register_hotkey(key: VIRTUAL_KEY, endpoint: &IAudioEndpointVolumeEx) {
+fn register_hotkey(key: VIRTUAL_KEY, enumerator: &IMMDeviceEnumerator) {
     unsafe {
         let hotkey = RegisterHotKey(HWND(0), 1, MOD_NOREPEAT, key.0.into());
         println!("hotkey registered: {:?}", hotkey);
 
+        let endpoint = get_default_input_endpoint(enumerator);
+
+        println!("state_handle started");
+        let _volume_callback = register_devicestate_change_notify(&endpoint);
+        println!("state_handle finished");
 
         let mut msg = MSG::default();
-        while GetMessageW(&mut msg, HWND(-1), 0, 0) != FALSE {
-            if msg.message != WM_HOTKEY {
-                continue;
+        loop {
+            GetMessageW(&mut msg, None, 0, 0);
+
+            match msg.message {
+                WM_HOTKEY => {
+                    match endpoint.GetMute().unwrap() {
+                        FALSE => endpoint.SetMute(TRUE, null()).unwrap(),
+                        TRUE => endpoint.SetMute(FALSE, null()).unwrap(),
+                        _ => {}
+                    }
+                }
+                _ => println!("{:?}", msg)
             }
-            println!("{:?}", msg);
-            toggle_mute(endpoint);
         };
-    };
-}
-
-fn toggle_mute(endpoint: &IAudioEndpointVolumeEx) {
-    unsafe {
-        let muted = endpoint.GetMute().unwrap();
-        match muted {
-            TRUE => endpoint.SetMute(FALSE, ptr::null()).unwrap(),
-            FALSE => endpoint.SetMute(TRUE, ptr::null()).unwrap(),
-            _ => {}
-        }
     }
 }
-
-/*
-
-maybe old code idk:
-
-    unsafe {
-        // CoInitializeEx(Some(ptr::null()), COINIT_MULTITHREADED).unwrap();
-
-        let enumerator: IMMDeviceEnumerator =
-            CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).unwrap();
-        let device = enumerator
-            .GetDefaultAudioEndpoint(eCapture, eMultimedia)
-            .unwrap();
-
-        let endpoint = device.Activate::<IAudioEndpointVolumeEx>(CLSCTX_ALL, Some(ptr::null())).unwrap();
-        let muted = endpoint.GetMute().unwrap();
-        match muted {
-            TRUE => endpoint.SetMute(FALSE, ptr::null()).unwrap(),
-            FALSE => endpoint.SetMute(TRUE, ptr::null()).unwrap(),
-            _ => {}
-        }
-
-        println!("{:#?}", muted);
-        // let manager: IAudioSessionManager2 = device.Activate(CLSCTX_ALL, ptr::null()).unwrap();
-        // let sessions = manager.GetSessionEnumerator().unwrap();
-        //
-        // for n in 0..sessions.GetCount().unwrap() {
-        //     let session_control = sessions.GetSession(n).unwrap();
-        // }
-
-        // CoUninitialize();
-    }
-*/

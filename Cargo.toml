@@ -8,11 +8,4 @@ edition = "2021"
 [dependencies]
 cue-sdk = "0.0.3"
 cue-sdk-sys = "0.0.5"
-inputbot = "0.6.0"
-rdev = { version = "0.5.3", features = ["unstable_grab"] }
-windows = { version = "0.51.1", features = ["Media_Audio", "Win32_Media_Audio", "Win32_Media_Audio_Endpoints", "Foundation_Collections", "Win32_UI_WindowsAndMessaging", "Win32_System_Com", "Win32_Foundation", "Win32_System_Com_StructuredStorage", "Win32_UI_Shell_PropertiesSystem", "Win32_System_Variant", "Win32_UI_Input_KeyboardAndMouse", "implement", "windows-implement", "Win32_System_WinRT"] }
-tokio = { version = "1.33.0", features = ["full"] }
-log = { version = "0.4.20", features = [] }
-
-#[env]
-#CUE_SDK_LIB_FILES_PATH = "C:\\Users\\naka\\Desktop\\CUESDK_3.0.355\\CUESDK\\lib\\x64"
+windows = { version = "0.52.0", features = ["Win32_System_Variant", "Win32_Foundation", "Win32_UI_Input_KeyboardAndMouse", "implement", "Win32_Media_Audio_Endpoints", "Win32_UI_WindowsAndMessaging", "Win32_System_Threading", "Win32_System_Com_StructuredStorage", "Win32_System_Com", "Win32_UI_Shell_PropertiesSystem"], default-features = false }
